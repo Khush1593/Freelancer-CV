@@ -1,0 +1,9 @@
+# requirements.txt
+flask
+python-dotenv
+requests
+pytesseract
+opencv-python
+Pillow
+unstructured-client
+fitz
