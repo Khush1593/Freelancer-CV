@@ -19,9 +19,11 @@ load_dotenv()
 
 def _log(debug: list | None, message: str):
     """Print to stdout and optionally collect debug messages into a list."""
+    import sys
     try:
         # Always print to console for live debugging
-        print(message)
+        print(message, flush=True)
+        sys.stdout.flush()
     finally:
         if debug is not None:
             debug.append(message)
@@ -409,6 +411,7 @@ RULES:
   • identify roles of entities
   • group content into insurance-relevant sections
 - When uncertain, state uncertainty explicitly.
+- If present information about the end_date then must include.
 
 Only output the extracted semantic transcription.
 """
@@ -438,177 +441,6 @@ Only output the extracted semantic transcription.
         _log(debug, f"Full error: {traceback.format_exc()}")
         return None
 
-
-def extract_insurance_data_from_page(image_path, debug: list | None = None):
-    """
-    DEPRECATED: Old single-step extraction (kept for fallback compatibility)
-    Extract insurance data from a single page/image using VLM
-    Returns dict with extracted data or None
-    """
-    # Basic debug info about the image we are sending
-    try:
-        file_size_kb = os.path.getsize(image_path) / 1024
-        _log(debug, f"   📄 Sending image: {os.path.basename(image_path)} ({file_size_kb:.1f} KB)")
-    except Exception:
-        _log(debug, f"   ⚠️ Could not stat image file: {image_path}")
-
-    # Initialize client
-    api_key = _get_hf_api_key(debug)
-    if not api_key:
-        return None
-    try:
-        client = OpenAI(
-            base_url="https://router.huggingface.co/v1",
-            api_key=api_key,
-        )
-        _log(debug, "   🌐 OpenAI client initialized (HF Router)")
-    except Exception as e:
-        _log(debug, f"   ❌ Failed to initialize OpenAI client: {e}")
-        return None
-    
-    # Encode image
-    _log(debug, f"\n📷 Processing: {os.path.basename(image_path)}")
-    image_data_url = encode_image_to_base64(image_path)
-    _log(debug, f"   🔗 Encoded image length: {len(image_data_url)} chars")
-    
-    try:
-        model_name = "Qwen/Qwen3-VL-8B-Instruct:novita"
-        _log(debug, f"   🤖 Calling model: {model_name}")
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": """You are an expert insurance policy analysis engine.
-
-You are given raw extracted insurance content from ALL pages of ONE insurance policy document.
-
-TASK:
-Generate a final insurance JSON using ONLY the provided content.
-
-CRITICAL INTERPRETATION RULES:
-1. Do NOT guess, infer, or calculate missing values.
-2. Use ONLY explicitly stated information.
-3. Prefer roles in this strict priority order:
-   - "Verzekeringnemer" → freelancer_name
-   - "Verzekeraar" or "Risicodrager" → insurance_company_name
-   - "Adviseur", "Gevolmachtigde", "Intermediair" → NEVER use as insurer
-4. If multiple names appear:
-   - Choose the name explicitly labeled as Verzekeringnemer.
-5. If a contract number includes suffixes like "/2", ignore the suffix and keep the base number.
-
-DATES:
-- Only populate end_date if explicitly stated.
-- If only duration or renewal is mentioned, do NOT infer an end date.
-- Format all dates as DD/MM/YYYY.
-
-COVERAGES:
-- Identify ALL distinct coverage types (e.g. Bedrijfsaansprakelijkheid, Beroepsaansprakelijkheid, Inventaris).
-- Each coverage MUST include:
-  - coverage_type (original language preferred)
-  - policy_number (if explicitly stated, otherwise "Not found")
-  - amount INCLUDING scope if present:
-    (e.g., "€ 2.500.000 per aanspraak / € 5.000.000 per jaar")
-- If limits differ per coverage, keep them separate.
-- If no distinct coverages are listed, return an empty array [].
-
-PREMIUM RULES:
-- Prefer premiums explicitly marked as "inclusief assurantiebelasting".
-- Include payment period if stated (per month / per year).
-- Ignore one-time settlement or pro-rata calculations unless explicitly stated as premium.
-
-INSURANCE NAME:
-- Use the product or policy type name.
-- Do NOT use the insurer name as insurance_name.
-
-CONDITIONS SUMMARY:
-- Summarize ONLY key conditions explicitly mentioned:
-  - exclusions
-  - deductibles
-  - special clauses
-  - coverage limitations
-  - territorial limits
-  - claims-made or occurrence basis
-- Do NOT add assumptions or legal interpretations.
-
-DERIVED FIELDS:
-- Do NOT derive max_insured_per_event or max_insured_per_year.
-- Always keep them as "Not found".
-
-OUTPUT FORMAT:
-Return ONLY a JSON object with EXACTLY this structure:
-
-{
-  "freelancer_name": "Name of the freelancer/insured person",
-  "insurance_contract_number": "Insurance or contract number",
-  "start_date": "Start date in DD/MM/YYYY format",
-  "end_date": "End date in DD/MM/YYYY format",
-  "coverages": [
-    {
-      "coverage_type": "Type of coverage",
-      "policy_number": "Policy number or Not found",
-      "amount": "Coverage amount with currency and scope"
-    }
-  ],
-  "insurance_company_name": "Name of insurance company",
-  "insurance_name": "Name or type of the insurance policy",
-  "insurance_premium": "Premium amount per period (including tax if specified)",
-  "conditions_summary": "Brief summary of key insurance conditions",
-  "max_insured_per_event": "if found then maximum insurance covered for any event else set Not Found",
-  "max_insured_per_year": "if found then maximum insurance covered for per year else set Not Found"
-}
-
---- EXTRACTED CONTENT FROM ALL PAGES ---
-{all_content}
---- END OF CONTENT ---
-
-Generate the final JSON now.
-"""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_data_url
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=512,
-            temperature=0.1
-        )
-        
-        response_text = completion.choices[0].message.content.strip()
-        _log(debug, f"   API Response len: {len(response_text)}")
-        _log(debug, f"   API Response (preview): {response_text[:300]}...")
-        
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            json_text = json_match.group(0)
-            try:
-                data_dict = json.loads(json_text)
-            except Exception as je:
-                _log(debug, f"   ❌ JSON decode error: {je}")
-                _log(debug, f"   JSON text preview: {json_text[:200]}...")
-                return None
-            _log(debug, f"   ✓ Extracted {len(data_dict)} fields")
-            return data_dict
-        else:
-            _log(debug, f"   ⚠️  No JSON found in response")
-        
-        return None
-        
-    except Exception as e:
-        _log(debug, f"❌ Error extracting from page: {e} ({type(e).__name__})")
-        import traceback
-        _log(debug, f"Full error: {traceback.format_exc()}")
-        return None
-
-
 def generate_final_json_from_content(all_content: str, debug: list | None = None) -> Optional[dict]:
     """
     Step 2: Generate final insurance JSON from aggregated page content.
@@ -636,7 +468,7 @@ def generate_final_json_from_content(all_content: str, debug: list | None = None
     try:
         model_name = "Qwen/Qwen3-VL-8B-Instruct:novita"
         _log(debug, f"   🤖 Calling model: {model_name} (JSON generation)")
-        
+
         prompt = f"""You are an insurance analysis engine.
 
 You are given extracted insurance-related content from all pages of a policy document.
@@ -645,12 +477,16 @@ TASK:
 Generate a final insurance JSON using ONLY the provided content.
 
 RULES:
-- Do NOT guess or infer missing data.
+- Do NOT guess or infer missing data, EXCEPT you MAY calculate an end_date from an explicitly stated contract duration and a known start_date.
 - Prefer values explicitly marked as including tax.
 - Support multiple coverage types as a list in the "coverages" field.
 - Each coverage should have: coverage_type, policy_number (if available), and amount.
 - If no separate coverages are found, leave "coverages" as an empty array [].
 - Dates must be DD/MM/YYYY format.
+- For end_date:
+    - If an explicit end date appears in the content, use that value.
+    - Otherwise, if the document clearly states a duration (for example "for 1 year", "2 years", "6 months") and the start_date is known, compute end_date as start_date plus that duration and return it in DD/MM/YYYY format.
+    - If neither an explicit end date nor a clear duration is present, set end_date to "Not found".
 - If a field is missing, use "Not found".
 
 OUTPUT FORMAT:
@@ -722,53 +558,6 @@ Generate the JSON now:"""
         _log(debug, f"Full error: {traceback.format_exc()}")
         return None
 
-
-def merge_insurance_data(page_results: List[dict], debug: list | None = None) -> dict:
-    """
-    Merge data from multiple pages
-    Prioritizes non-"Not found" values
-    """
-    merged = {
-        "freelancer_name": "Not found",
-        "insurance_contract_number": "Not found",
-        "start_date": "Not found",
-        "end_date": "Not found",
-        "coverages": [],
-        "insurance_company_name": "Not found",
-        "insurance_name": "Not found",
-        "insurance_premium": "Not found",
-        "conditions_summary": "Not found",
-        "max_insured_per_event": "Not found",
-        "max_insured_per_year": "Not found"
-    }
-    
-    updates = 0
-    all_coverages = []
-    for idx, result in enumerate(page_results, start=1):
-        if result:
-            _log(debug, f"   🔎 Merging page {idx}: keys={list(result.keys())}")
-            for key, value in result.items():
-                if key == "coverages" and isinstance(value, list):
-                    # Aggregate all coverages from all pages
-                    all_coverages.extend(value)
-                    _log(debug, f"     ↳ Added {len(value)} coverage(s) from page {idx}")
-                elif isinstance(merged.get(key), str):
-                    # Update if current value is "Not found" and new value is not
-                    if merged.get(key, "Not found").lower() == "not found" and str(value).lower() != "not found":
-                        merged[key] = value
-                        updates += 1
-                        _log(debug, f"     ↳ Set '{key}' -> '{value}'")
-    
-    # Set aggregated coverages
-    if all_coverages:
-        merged["coverages"] = all_coverages
-        _log(debug, f"   📋 Total coverages collected: {len(all_coverages)}")
-    
-    _log(debug, f"   🔁 Merge updates applied: {updates}")
-    
-    return merged
-
-
 def extract_insurance_data_vlm(file_path, max_pages=50, debug: list | None = None):
     """
     Extract structured insurance data using VLM with Pydantic validation
@@ -817,16 +606,6 @@ def extract_insurance_data_vlm(file_path, max_pages=50, debug: list | None = Non
         
         if not all_page_contents:
             _log(debug, "❌ No content extracted from any page")
-            # Try text-only fallback from PDF content
-            _log(debug, "🛟 Falling back to PDF text extraction...")
-            fallback = extract_insurance_from_pdf_text(file_path, debug=debug)
-            if fallback:
-                try:
-                    insurance_data = InsuranceData(**fallback)
-                    _log(debug, "✅ Fallback PDF text extraction succeeded")
-                    return insurance_data
-                except Exception as e:
-                    _log(debug, f"❌ Fallback validation error: {e}")
             return None
         
         # Step 2: Aggregate all content and generate final JSON
@@ -837,16 +616,6 @@ def extract_insurance_data_vlm(file_path, max_pages=50, debug: list | None = Non
         
         if not merged_data:
             _log(debug, "❌ Failed to generate JSON from aggregated content")
-            # Try text-only fallback
-            _log(debug, "🛟 Falling back to PDF text extraction...")
-            fallback = extract_insurance_from_pdf_text(file_path, debug=debug)
-            if fallback:
-                try:
-                    insurance_data = InsuranceData(**fallback)
-                    _log(debug, "✅ Fallback PDF text extraction succeeded")
-                    return insurance_data
-                except Exception as e:
-                    _log(debug, f"❌ Fallback validation error: {e}")
             return None
         
     else:
@@ -887,17 +656,6 @@ def extract_insurance_data_vlm(file_path, max_pages=50, debug: list | None = Non
         _log(debug, f"Data received: {json.dumps(merged_data, indent=2)}")
         import traceback
         _log(debug, f"Traceback: {traceback.format_exc()}")
-        # As last resort, if PDF, attempt text fallback
-        if file_path.lower().endswith('.pdf'):
-            _log(debug, "🛟 Validation failed; attempting PDF text fallback...")
-            fallback = extract_insurance_from_pdf_text(file_path, debug=debug)
-            if fallback:
-                try:
-                    insurance_data = InsuranceData(**fallback)
-                    _log(debug, "✅ Fallback PDF text extraction succeeded (after validation error)")
-                    return insurance_data
-                except Exception as e2:
-                    _log(debug, f"❌ Fallback validation error: {e2}")
         return None
 
 
@@ -914,148 +672,31 @@ def process_insurance_file(file_path, max_pages=50):
     Returns InsuranceData or None
     """
     return extract_insurance_data_vlm(file_path, max_pages=max_pages)
-
-
-# ----------------------
-# PDF Text Fallback
-# ----------------------
-def _first_match(patterns: list[str], text: str, flags=re.IGNORECASE) -> Optional[str]:
-    for pat in patterns:
-        m = re.search(pat, text, flags)
-        if m:
-            # return first non-empty group or whole match
-            if m.lastindex:
-                for i in range(1, m.lastindex + 1):
-                    if m.group(i):
-                        return m.group(i).strip()
-            return m.group(0).strip()
-    return None
-
-
-def extract_insurance_from_pdf_text(pdf_path: str, debug: list | None = None) -> Optional[dict]:
-    try:
-        doc = fitz.open(pdf_path)
-        texts = []
-        for i, page in enumerate(doc):
-            t = page.get_text("text")
-            _log(debug, f"   📝 Extracted text from page {i+1}: {len(t)} chars")
-            texts.append(t)
-        doc.close()
-        full = "\n".join(texts)
-        if not full.strip():
-            _log(debug, "   ⚠️ No text found in PDF")
-            return None
-
-        # Normalize thousand separators and currency signs for matching
-        norm = full
-
-        # Basic patterns (Dutch/English variants)
-        name = _first_match([
-            r"Naam\s*:\s*(.+)",
-            r"Name\s*:\s*(.+)",
-            r"Policy holder\s*:\s*(.+)",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - freelancer_name: {name}")
-
-        contract = _first_match([
-            r"(Policy|Polis|Contract)\s*(No\.|Number|Nummer|nr\.?|#)\s*[:\-]?\s*([A-Z0-9\-/_.]+)",
-            r"Polisnummer\s*[:\-]?\s*([A-Z0-9\-/_.]+)",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - insurance_contract_number: {contract}")
-
-        # Dates
-        date_pat = r"(\d{2}[./-]\d{2}[./-]\d{4})"
-        start_date = _first_match([
-            rf"Start\s*(date|datum)\s*[:\-]?\s*{date_pat}",
-            rf"Ingangsdatum\s*[:\-]?\s*{date_pat}",
-            date_pat,
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - start_date: {start_date}")
-        end_date = _first_match([
-            rf"End\s*(date|datum)\s*[:\-]?\s*{date_pat}",
-            rf"Einddatum\s*[:\-]?\s*{date_pat}",
-            date_pat,
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - end_date: {end_date}")
-
-        # Amounts per event/year (look for euro amounts on lines mentioning event/year)
-        amt = r"(?:€|EUR)\s*[0-9][0-9 .,.]*"
-        per_event = _first_match([
-            rf"(per\s*event|per\s*gebeurtenis)[^\n]*({amt})",
-            rf"({amt}).{0,40}(per\s*event|per\s*gebeurtenis)",
-        ], norm)
-        if per_event:
-            per_event = per_event if per_event.startswith("€") or per_event.upper().startswith("EUR") else per_event
-        _log(debug, f"   🔎 Fallback match - max_insured_per_event: {per_event}")
-
-        per_year = _first_match([
-            rf"(per\s*year|per\s*jaar)[^\n]*({amt})",
-            rf"({amt}).{0,40}(per\s*year|per\s*jaar)",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - max_insured_per_year: {per_year}")
-
-        company = _first_match([
-            r"(Insurer|Insurance\s*Company|Verzekeraar)\s*[:\-]?\s*(.+)",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - insurance_company_name: {company}")
-
-        ins_name = _first_match([
-            r"(Insurance\s*Name|Verzekering)\s*[:\-]?\s*(.+)",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - insurance_name: {ins_name}")
-
-        premium = _first_match([
-            rf"(Premium|Premie)[^\n]*({amt})",
-        ], norm)
-        _log(debug, f"   🔎 Fallback match - insurance_premium: {premium}")
-
-        # Map to schema with Not found defaults
-        data = {
-            "freelancer_name": name or "Not found",
-            "insurance_contract_number": (contract or "Not found"),
-            "start_date": (start_date or "Not found").replace("-", "/").replace(".", "/"),
-            "end_date": (end_date or "Not found").replace("-", "/").replace(".", "/"),
-            "coverages": [],
-            "insurance_company_name": company or "Not found",
-            "insurance_name": ins_name or "Not found",
-            "insurance_premium": premium or "Not found",
-            "conditions_summary": "Not found",
-            "max_insured_per_event": per_event or "Not found",
-            "max_insured_per_year": per_year or "Not found",
-        }
-
-        _log(debug, f"   🧩 Fallback parsed fields: {json.dumps(data, indent=2)}")
-        return data
-    except Exception as e:
-        _log(debug, f"❌ PDF text fallback error: {e}")
-        return None
-
-
-if __name__ == "__main__":
-    # Test files
-    test_files = [
-        r"Insurance_data\Polis_en_voorwaarden_BN180001982aansprakelijkheidbedrijven.pdf",
-        # r"Insurance_data\IMG_5720.png"
-    ]
+# if __name__ == "__main__":
+#     # Test files
+#     test_files = [
+#         # r"Insurance_data\Polis_en_voorwaarden_BN180001982aansprakelijkheidbedrijven.pdf",
+#         r"Insurance_data\IMG_5720.png"
+#     ]
     
-    # Test with first available file
-    for test_file in test_files:
-        if os.path.exists(test_file):
-            print(f"\n{'='*70}")
-            print(f"Testing with: {test_file}")
-            print(f"{'='*70}")
+#     # Test with first available file
+#     for test_file in test_files:
+#         if os.path.exists(test_file):
+#             print(f"\n{'='*70}")
+#             print(f"Testing with: {test_file}")
+#             print(f"{'='*70}")
             
-            result = process_insurance_file(test_file, max_pages=50)
+#             result = process_insurance_file(test_file, max_pages=50)
             
-            if result:
-                print("\n" + "="*70)
-                print("FINAL JSON OUTPUT")
-                print("="*70)
-                print(json.dumps(result.model_dump(), indent=2))
-                print("="*70)
-            else:
-                print("\n❌ Failed to extract insurance data")
+#             if result:
+#                 print("\n" + "="*70)
+#                 print("FINAL JSON OUTPUT")
+#                 print("="*70)
+#                 print(json.dumps(result.model_dump(), indent=2))
+#                 print("="*70)
+#             else:
+#                 print("\n❌ Failed to extract insurance data")
             
-            break
-    else:
-        print("⚠️  No test files found. Please add insurance documents to input_data folder.")
+#             break
+#     else:
+#         print("⚠️  No test files found. Please add insurance documents to input_data folder.")

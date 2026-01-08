@@ -134,6 +134,8 @@ async def extract_document_data(
         JSON with document data
     """
     temp_file_path = None
+    debug_logs: list[str] = []  # Initialize at function scope so it's always available
+    data_type = None
     
     try:
         # Validate document type
@@ -175,8 +177,6 @@ async def extract_document_data(
         elif document_type == 1:
             # Insurance document processing
             print("Starting insurance document processing...")
-            # Build a debug log collector that we ALWAYS include on failure
-            debug_logs: list[str] = []
             extracted_data = extract_insurance_data_vlm(
                 temp_file_path, max_pages=50, debug=debug_logs
             )
@@ -191,12 +191,12 @@ async def extract_document_data(
         
         if extracted_data is None:
             logger.error("Document processing returned None")
-            # Include debug logs if available
-            if document_type == 1:
-                truncated = "\n".join(debug_logs[-80:]) if 'debug_logs' in locals() else ""
+            # Include debug logs if available for insurance
+            if document_type == 1 and debug_logs:
+                truncated = "\n".join(debug_logs[-80:])
                 # Friendly hint when no API key is present
                 hint = ""
-                if 'debug_logs' in locals() and any("No API key found" in line for line in debug_logs):
+                if any("No API key found" in line for line in debug_logs):
                     hint = ("\n\nHint: No HF/OpenAI token detected. Set one of: "
                             "HF_TOKEN, HUGGINGFACEHUB_API_TOKEN, or OPENAI_API_KEY.")
                 if truncated:
@@ -223,17 +223,23 @@ async def extract_document_data(
         
         print(f"Successfully extracted {data_type} data")
         
+        # Build response
+        response_data = {
+            "success": True,
+            "document_type": document_type,
+            "document_type_name": DOCUMENT_TYPES[document_type],
+            "data": result,
+            "filename": file.filename,
+            "revision": APP_REV,
+        }
+        
+        # Always include debug logs for insurance documents if available
+        if document_type == 1 and debug_logs:
+            response_data["debug"] = debug_logs
+        
         return JSONResponse(
             status_code=200,
-            content={
-                "success": True,
-                "document_type": document_type,
-                "document_type_name": DOCUMENT_TYPES[document_type],
-                "data": result,
-                "filename": file.filename,
-                "revision": APP_REV,
-                **({"debug": debug_logs} if document_type == 1 and debug and 'debug_logs' in locals() else {})
-            }
+            content=response_data
         )
     
     except HTTPException:
