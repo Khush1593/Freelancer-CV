@@ -1,2 +1,6 @@
 venv
 .env
+temp_insurance_pdf
+temp_vlm_pdf
+__pycache__/
+*.pyc

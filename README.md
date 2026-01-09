@@ -11,10 +11,10 @@ This project is for text detection using the EAST model and related document/ima
 ## Main Files
 - `api_server.py` - Main API server
 - `auth_utils.py` - Authentication utilities
-- `hf_text_call.py` - HuggingFace text extraction
+- `hf_text_call.py` - HuggingFace text extraction     (WHERE)
 - `insurance_data_extractor.py` - Insurance data extraction logic
 - `pdf2_image.py` - PDF to image conversion
-- `VLM_image_call.py` - Vision-Language Model image call
+- `VLM_image_call.py` - Vision-Language Model image call   (WHERE)
 - `frontend.html` - Frontend interface
 - `test_api_client.py` - API client for testing
 
